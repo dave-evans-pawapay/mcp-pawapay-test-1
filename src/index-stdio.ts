@@ -1,23 +1,25 @@
-
+#!/usr/bin/env node
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { config } from 'dotenv';
 import { z } from 'zod';
-import { getLettsCoreContent } from "./lettscore.js";
+import { DepositRequest, DepositResponse, getActiveConf, getCorrespondentAvailability, getCorrespondentPredict, getDeposit, sendDeposit } from "./pawapay.js";
+import { DateTime } from "luxon";
 
 // Load environment variables
 config();
+
 
 // Environment variables validation
 const envSchema = z.object({
   PORT: z.string().default('3000'),
   HOST: z.string().default('localhost'),
-  LETTS_CORE_API_URL: z.string().url(),
-  LETTS_CORE_API_TOKEN: z.string().min(1),
-  MCP_SERVER_NAME: z.string().default('LettsCore MCP Server'),
+  PAWAPAY_API_URL: z.string().default('https://api.sandbox.pawapay.cloud'),
+  PAWAPAY_API_KEY: z.string().default('YOUR KEY HERE'),
+  MCP_SERVER_NAME: z.string().default('pawaPay MCP Transactions'),
   MCP_SERVER_VERSION: z.string().default('1.0.0')
 });
-const env = envSchema.parse(process.env);
+export const env = envSchema.parse(process.env);
 const server = new McpServer({
   name: env.MCP_SERVER_NAME,
   version: env.MCP_SERVER_VERSION,
@@ -25,100 +27,104 @@ const server = new McpServer({
 });
 
 
-  
-server.resource(
-    "echo",
-    new ResourceTemplate("echo://{message}", { list: undefined }),
-    async (uri, { message }) => ({
-      contents: [{
-        uri: uri.href,
-        text: `Resource echo: ${message}`
-      }]
-    })
-  );
-
-
-  const contentTemplate = new ResourceTemplate('content://{guid}', {
+  const depositTemplate = new ResourceTemplate('deposit://{depositId}', {
     list: undefined,
   });
 
   server.resource(
-    'content',
-    contentTemplate,
+    'deposit',
+    depositTemplate,
     async (uri, params, ctx) => {
-      console.log('Accessing content:', params.guid); // Access context here
-      return {
-        contents: [{
-          uri: uri.href,
-          text: 'getting content',
-        }],
-      };
-    }
-  );
-
-  const allContentTemplate = new ResourceTemplate('contents://{all}', {
-    list: undefined
-  });
-
-  server.resource(
-    "contents",
-    allContentTemplate,
-    async (uri, params, ctx) => {
-        let contents = [{
-          uri: uri.href,
-          text: 'No content'
-        }]
-      if (env.LETTS_CORE_API_TOKEN) {
-        const c: any = await getLettsCoreContent(env.LETTS_CORE_API_TOKEN);
-        if (c && c.data && c.data.length > 0) {
-          contents = [{
-            uri: uri.href,
-            text: JSON.stringify(c.data)
-          }]
+      let token : string | undefined = env.PAWAPAY_API_KEY;
+      const results: DepositResponse[] = [];
+      if (Array.isArray(params.depositId)) {
+        for (const depositId of params.depositId) {
+          const response = await getDeposit(depositId, token, env.PAWAPAY_API_URL);
+          results.push(response);
         }
       } else {
-        const c = await getLettsCoreContent();
-        if (c && c.length > 0) {
-          contents = [{
-            uri: uri.href,
-            text: JSON.stringify(c)
-          }]
+        const response = await getDeposit(params.depositId, token, env.PAWAPAY_API_URL); 
+        results.push(response);
       }
-    }
-      return { contents: contents };
-    }
-  );
-  
-  server.tool(
-    "echo",
-    { message: z.string() },
-    async ({ message }, ctx) => {
-     return { content: [{ type: "text", text: `Tool echo: ${message}` }]}
+      return { contents: [{
+        uri: uri.href,
+        text: JSON.stringify(results)
+      }]}
     }
   );
 
-    server.tool(
-      "listContents",
-      {},
-      async ({}) => {
-          let contentStr = "No Content"
-          if (env.LETTS_CORE_API_TOKEN) {
-            const c: any = await getLettsCoreContent(env.LETTS_CORE_API_TOKEN);
-            if (c && c.data && c.data.length > 0) {
-              contentStr = JSON.stringify(c.data)
-            }
-          } else {
-            const c = await getLettsCoreContent();
-            if (c && c.length > 0) {
-              contentStr = JSON.stringify(c)
-            }
+  server.tool(
+    "activeConf",
+    { },
+    async ({}, ctx: any) => {
+     let token = env.PAWAPAY_API_KEY;
+     const response = await getActiveConf(token ,env.PAWAPAY_API_URL); 
+     return { content: [{ type: "text", text: JSON.stringify(response) }]}
+    }
+  );
+
+  server.tool(
+    "correspondentPredict",
+    { msisdn: z.string() },
+    async ({ msisdn }, ctx: any) => {  
+     let token = env.PAWAPAY_API_KEY;
+     const response = await getCorrespondentPredict(msisdn, token ,env.PAWAPAY_API_URL); 
+     return { content: [{ type: "text", text: JSON.stringify(response) }]}
+    }
+  );
+
+  server.tool(
+    "correspondentAvailability",
+    { },
+    async ({  }, ctx: any) => {
+     const response = await getCorrespondentAvailability(env.PAWAPAY_API_URL); 
+     return { content: [{ type: "text", text: JSON.stringify(response) }]}
+    }
+  );
+
+  server.tool(
+    "deposit",
+    { depositId: z.string(),
+      amount: z.string(),
+      currency: z.string(),
+      msisdn: z.string(),
+      correspondent: z.string(),
+      country: z.string(),
+      description: z.string(),
+     },
+    async ({ depositId, amount, currency, msisdn, correspondent, country, description }, ctx: any) => {
+     const deposit : DepositRequest = {
+      depositId,
+      preAuthorisationCode: null ,
+      amount,
+      currency,
+      country,
+      correspondent,
+       payer: {
+        type: 'MSISDN',
+        address: {
+          value: msisdn
           }
-          return { content: [{
-              type: "text",
-              text: contentStr
-          }]}
-        }
-    );
+        },
+       statementDescription: description,
+       customerTimestamp: DateTime.now().toISO(),
+       metadata: null
+     }
+     let token = env.PAWAPAY_API_KEY;
+     const response = await sendDeposit(deposit, token, env.PAWAPAY_API_URL); 
+     return { content: [{ type: "text", text: JSON.stringify(response) }]}
+    }
+  );
+
+  server.tool(
+    "depositStatus",
+    { transactionId: z.string() },
+    async ({ transactionId }, ctx: any) => {
+     let token = env.PAWAPAY_API_KEY;
+     const response = await getDeposit(transactionId, token, env.PAWAPAY_API_URL); 
+     return { content: [{ type: "text", text: JSON.stringify(response) }]}
+    }
+  );
   
   server.prompt(
     "echo",
